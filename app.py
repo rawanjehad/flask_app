@@ -7,7 +7,7 @@ from sqlalchemy.sql import func
 from datetime import datetime
 from werkzeug.utils import secure_filename
 from flask_session.__init__ import Session
-import sqlite3
+import pymysql
 import atexit
 import random
 from PIL import ImageFile
@@ -15,20 +15,19 @@ from PIL import ImageFile
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
-UPLOAD_FOLDER = './static/images_added_by _the_user/'
+UPLOAD_FOLDER = './static/images_added_by_the_user/'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 SESSION_TYPE = 'memcache'
 
 global memcache
 memcache = {}
-
 app = Flask(__name__, static_url_path='/static')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///keys.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://admin:abc123456789@could-db.cjse53ajjn81.us-east-1.rds.amazonaws.com/cldb_memcach'
 db = SQLAlchemy(app)
 sess = Session()
 
-class Keys(db.Model):
+class Images(db.Model):
     key_id = db.Column(db.String(200), primary_key=True)
     img_path = db.Column(db.String(200), nullable=False)
     date_created = db.Column(db.DateTime(timezone=True), server_default=func.now())
@@ -43,14 +42,29 @@ class MemcacheConfig(db.Model):
     hit_rate_percent = db.Column(db.Float())
     miss_rate_percent = db.Column(db.Float())
 
+def get_db_connection():
+    return pymysql.connect(host="could-db.cjse53ajjn81.us-east-1.rds.amazonaws.com",
+                           port=3306,
+                           user='admin',
+                           passwd='abc123456789',
+                           db='cldb')
+
+def get_mem_db_connection():
+    return pymysql.connect(host="could-db.cjse53ajjn81.us-east-1.rds.amazonaws.com",
+                           port=3306,
+                           user='admin',
+                           passwd='abc123456789',
+                           db='cldb_memcach')
+
 #Clear memcache_config table
 with app.app_context():
-    my_conn = sqlite3.connect('./instance/keys.db')
-    my_conn.execute("DROP table IF EXISTS memcache_config")
+    conn = get_mem_db_connection()
+    cur = conn.cursor()
+    cur.execute("DROP table IF EXISTS memcache_config")
     db.create_all()
-    my_conn.execute('INSERT INTO memcache_config VALUES (?, ?, ?, ?, ?, ?, ?)', (5000000, "Random", 0, 0, 0, 0, 0)) #Default values for memcache_config
-    my_conn.commit()
-    my_conn.close()
+    cur.execute("INSERT INTO memcache_config VALUES (5000000, 'Random', 0, 0, 0, 0, 0)") #Default values for memcache_config
+    conn.commit()
+    conn.close()
 
 #Update memconfig every 5 seconds
 item_size_in_mem = 0 #Is updated whenever we add or remove file
@@ -80,16 +94,6 @@ atexit.register(lambda: scheduler.shutdown())
 #Functions
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def get_db_connection():
-    conn = sqlite3.connect('./instance/keys.db')
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def get_mem_db_connection():
-    conn = sqlite3.connect('./instance/memcache_config.db')
-    conn.row_factory = sqlite3.Row
-    return conn
 
 #Memcache operations
 def put_in_memcache(key, value, img_size):
@@ -159,14 +163,13 @@ def upload_file():
         key_id = request.form.get('img_key').strip()
         conn = get_db_connection()
 
-
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
             img_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(img_path)
             img_size = file.tell()
 
-            raw = Keys.query.filter_by(key_id=key_id).first()
+            raw = Images.query.filter_by(key_id=key_id).first()
             key_exists = raw is not None
             if key_exists:
                 raw.img_path = img_path #update in Database
@@ -176,11 +179,11 @@ def upload_file():
                 put_in_memcache(key_id, img_path, img_size)
                 flash("Key Updated Successfully!")
             else: 
-                #Save key and img_path into db                
+                #Save key and img_path into db
                 if key_id == null or key_id == '':
                     flash("Please enter a key for the photo")
                 else:
-                    conn.execute('INSERT INTO keys (key_id, img_path) VALUES (?, ?)', (key_id, img_path))
+                    conn.cursor().execute('INSERT INTO images (key_id, img_path) VALUES ({}, \"{}\")'.format(key_id, img_path))
                     put_in_memcache(key_id, img_path, img_size)
                     flash("Key Added Successfully!")
         else:
@@ -220,7 +223,7 @@ def search():
     else:
         global miss_rate_percent_from_mem
         miss_rate_percent_from_mem = miss_rate_percent_from_mem + 1
-        img_path = Keys.query.filter_by(key_id=key_id).first()
+        img_path = Images.query.filter_by(key_id=key_id).first()
         if img_path:
             return render_template('SearchanImage.html', user_image = img_path.img_path)
         else:
@@ -233,8 +236,7 @@ def getAllKey():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        sqlite_select_query = """SELECT key_id from Keys"""
-        cur.execute(sqlite_select_query)
+        cur.execute('SELECT key_id from images')
         records = cur.fetchall()
         records = list(*zip(*records))
         conn.commit()
@@ -243,13 +245,9 @@ def getAllKey():
             print(column)
         conn.close()
         return render_template('displayAllKeys.html', keys_list = records)
-    except sqlite3.Error as error:
-        print("Failed to read data from sqlite table", error)
+    except pymysql.Error as error:
+        print("Failed to read data from pymysql table", error)
         return render_template('displayAllKeys.html')
-    finally:
-        if conn:
-            conn.close()
-            print("The SQLite connection is closed")
 
 @app.route('/clear', methods=['POST'])
 def clear():
@@ -263,4 +261,4 @@ if __name__ == "__main__":
     app.config['SESSION_TYPE'] = 'filesystem'
 
     sess.init_app(app)
-    app.run(debug=False)
+    app.run(debug=False,host='172.31.86.92',port=5000)
