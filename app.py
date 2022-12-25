@@ -10,14 +10,24 @@ from flask_session.__init__ import Session
 import pymysql
 import atexit
 import random
+import boto3
 from PIL import ImageFile
+import requests
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
-UPLOAD_FOLDER = './static/images_added_by_the_user/'
+UPLOAD_FOLDER = 'static/images_added_by_the_user/'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 SESSION_TYPE = 'memcache'
+
+
+AWS_S3_UNAME="rawan"
+AWS_S3_BKT="could-storage"
+AWS_S3_ACC_KEY="AKIA2LLPL5DJXGPQHKGA"
+AWS_S3_SEC_ACC_KEY="9rX+da8KgTrRJQ08N72ueW3LtHlxhvP+orYM1yj9"
+
+s3 = boto3.client("s3", aws_access_key_id=AWS_S3_ACC_KEY, aws_secret_access_key=AWS_S3_SEC_ACC_KEY)
 
 global memcache
 memcache = {}
@@ -41,6 +51,10 @@ class MemcacheConfig(db.Model):
     request_num = db.Column(db.Integer())
     hit_rate_percent = db.Column(db.Float())
     miss_rate_percent = db.Column(db.Float())
+
+def download_file(url, dest):
+    response = requests.get(url)
+    open(dest, "wb").write(response.content)
 
 def get_db_connection():
     return pymysql.connect(host="could-db.cjse53ajjn81.us-east-1.rds.amazonaws.com",
@@ -165,12 +179,16 @@ def upload_file():
 
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            img_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(img_path)
-            img_size = file.tell()
+            tmp_img_path = os.path.join("/tmp/",filename)
+            file.save(tmp_img_path)
 
+            s3.upload_file(tmp_img_path, AWS_S3_BKT, "{}{}".format(app.config['UPLOAD_FOLDER'], filename))
+
+            img_size = file.tell()
+            os.remove(tmp_img_path)
             raw = Images.query.filter_by(key_id=key_id).first()
             key_exists = raw is not None
+            img_path = "https://could-storage.s3.amazonaws.com/static/images_added_by_the_user/"+filename
             if key_exists:
                 raw.img_path = img_path #update in Database
                 db.session.commit()
@@ -215,9 +233,12 @@ def search():
     if img_path_from_memcache:
         global hit_rate_percent_from_mem
         hit_rate_percent_from_mem = hit_rate_percent_from_mem + 1
-        img_size = os.stat(memcache[key_id]).st_size
+        temp_img_path = "/tmp/" + memcache[key_id].split("/")[-1]
+        download_file(memcache[key_id], temp_img_path)
+        img_size = os.stat(temp_img_path).st_size
         invalidateKey(key_id, img_size)
         put_in_memcache(key_id, img_path_from_memcache, img_size)
+        os.remove(temp_img_path)
         return render_template('SearchanImage.html', user_image = img_path_from_memcache)
     #Get from database  
     else:
